@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -3.12 -c \"import py_compile; [py_compile.compile\\(f, doraise=True\\) for f in ['streamlit_app.py', 'agents/market_intel.py', 'agents/trend_researcher.py', 'config.py']]; print\\('All OK'\\)\")",
+      "Bash(py -3.12 -c \"import py_compile; [py_compile.compile\\(f, doraise=True\\) for f in ['agents/base.py', 'agents/trend_researcher.py', 'streamlit_app.py']]; print\\('All OK'\\)\")",
+      "Bash(py -3.12 -c \"import py_compile; py_compile.compile\\('streamlit_app.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(py -3.12 -c ':*)"
+    ]
+  }
+}
