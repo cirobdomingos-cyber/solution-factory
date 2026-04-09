@@ -29,6 +29,7 @@ from agents.execution_planner import ExecutionPlannerAgent
 from agents.critic import CriticalReviewAgent
 from utils.export import export_results, save_session, list_sessions, load_session, update_idea_stage
 from utils.pdf_export import build_pdf_bytes
+from utils.trend_metrics import render_exploration_metrics, render_trend_metrics
 
 # ---------------------------------------------------------------------------
 # Auth helpers
@@ -303,24 +304,21 @@ with st.sidebar:
 # ====================================================================
 
 def render_trends(ctx: dict) -> None:
+    """Render Phase 0 trends with metrics dashboard."""
     trends = ctx.get("trends", [])
-    sentiment = ctx.get("market_sentiment", "unknown")
-    takeaway = ctx.get("key_takeaway", "")
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.metric("Market Sentiment", sentiment.upper())
-        st.metric("Trends Found", len(trends))
-    with col2:
-        if takeaway:
-            st.info(f"**Key Takeaway:** {takeaway}")
-    for t in trends:
-        with st.expander(f"**{t.get('title', 'Untitled')}** — _{t.get('recency', '?')}_"):
-            st.markdown(t.get("description", ""))
-            for s in t.get("source_signals", []):
-                st.markdown(f"- {s}")
-            impl = t.get("opportunity_implication", "")
-            if impl:
-                st.success(f"**Builder implication:** {impl}")
+    if not trends:
+        st.warning("No trends found. Continuing with built-in knowledge.")
+        return
+    
+    # Use the new metrics-focused render function
+    trends_output = {
+        "trends": trends,
+        "market_sentiment": ctx.get("market_sentiment", "cautious"),
+        "key_takeaway": ctx.get("key_takeaway", ""),
+        "domain": ctx.get("user_prompt", "Unknown Domain"),
+        "search_queries_used": ctx.get("search_queries_used", []),
+    }
+    render_trend_metrics(trends_output)
 
 
 def render_opportunities(ctx: dict) -> None:
@@ -785,6 +783,12 @@ if step == "exploring":
             st.session_state.exploration_angles = result.get("exploration_angles", [])
             st.session_state.exploration_paths = result.get("exploration_paths", [])
             st.session_state.exploration_domain = result.get("exploration_domain", ctx["user_prompt"])
+            # Store full exploration output for metrics rendering
+            st.session_state.exploration_output = {
+                "exploration_domain": result.get("exploration_domain", ""),
+                "broad_areas": result.get("broad_areas", []),
+                "exploration_paths": result.get("exploration_paths", []),
+            }
             elapsed = time.time() - start
             status.update(label=f"Topic exploration — {elapsed:.1f}s", state="complete", expanded=False)
             st.session_state.step = "explored"
@@ -821,6 +825,10 @@ if step == "explored":
             f"I found **{len(paths)} broad-to-narrow paths** based on live online signals in **{domain}**. "
             "Pick the paths you want to investigate first."
         )
+        # Render metrics dashboard for exploration paths
+        exploration_output = st.session_state.get("exploration_output", {})
+        if exploration_output:
+            render_exploration_metrics(exploration_output)
     else:
         st.markdown(
             f"I found **{len(angles)} angles** to explore in **{domain}**. "
