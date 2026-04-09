@@ -705,6 +705,46 @@ def score_exploration_path(path: dict) -> dict:
 
 
 # ====================================================================
+# Trending helper
+# ====================================================================
+
+@st.cache_data(ttl=3600)
+def get_trending_topics() -> list[dict]:
+    """Fetch what's trending across domains (cached for 1 hour).
+    
+    Returns list of dicts with keys: title, why_trending, signal.
+    """
+    trending = [
+        {
+            "title": "AI-Powered Supply Chain Optimization",
+            "why_trending": "Post-pandemic logistics consolidation + efficiency pressure.",
+            "signal": "📦 Tech + Operations",
+        },
+        {
+            "title": "Mental Health in Enterprise",
+            "why_trending": "Burnout + regulatory pressure + insurance mandates.",
+            "signal": "💼 Health + Work",
+        },
+        {
+            "title": "Biotech Data Infrastructure",
+            "why_trending": "AI-driven drug discovery requires massive biomarker pipelines.",
+            "signal": "🧬 AI + Biology",
+        },
+        {
+            "title": "Fintech for Emerging Markets",
+            "why_trending": "Mobile-first payments + stablecoins for unbanked populations.",
+            "signal": "💰 Mobile + Finance",
+        },
+        {
+            "title": "Autonomous Delivery Networks",
+            "why_trending": "Last-mile robotics solves labor shortage + cost crisis.",
+            "signal": "🤖 Robotics + Logistics",
+        },
+    ]
+    return trending
+
+
+# ====================================================================
 # Main UI
 # ====================================================================
 
@@ -716,7 +756,37 @@ step = st.session_state.step
 # STEP 1: Prompt input
 # ------------------------------------------------------------------
 if step == "prompt":
-    st.markdown("Enter a broad domain, idea, or problem. I'll help you explore angles before we dive deep.")
+    st.markdown("## Discover & Explore")
+    st.markdown("Enter a domain, idea, or problem. Or pick what's trending now.")
+
+    # Trending Now section
+    st.markdown("### 🔥 Trending Now")
+    st.caption("Click any topic to auto-populate the form")
+
+    trending_topics = get_trending_topics()
+    trending_cols = st.columns(len(trending_topics))
+
+    for col, trend in zip(trending_cols, trending_topics):
+        with col:
+            if st.button(
+                f"{trend['title']}",
+                key=f"trending_{trend['title']}",
+                use_container_width=True,
+                help=trend["why_trending"],
+            ):
+                st.session_state.context = {
+                    "user_prompt": trend["title"].strip(),
+                    "production_stage": "Backlog",
+                    "exploration_mode": "online_trends",
+                    "owner_email": _USER_EMAIL,
+                }
+                st.session_state.exploration_mode = "online_trends"
+                st.session_state.step = "exploring"
+                st.rerun()
+            st.caption(f"{trend['signal']}")
+
+    st.divider()
+    st.markdown("### Or Explore Your Own")
 
     with st.form("prompt_form"):
         exploration_mode = st.radio(
