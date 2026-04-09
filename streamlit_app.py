@@ -35,12 +35,60 @@ from utils.trend_metrics import render_exploration_metrics, render_trend_metrics
 # Auth helpers
 # ---------------------------------------------------------------------------
 
+_AUTH_PLACEHOLDER_PREFIXES = (
+    "REPLACE_WITH_",
+    "YOUR_",
+    "CHANGE_ME",
+)
+
+
+def _is_missing_or_placeholder(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return True
+    upper = text.upper()
+    return any(prefix in upper for prefix in _AUTH_PLACEHOLDER_PREFIXES)
+
 def _auth_is_configured() -> bool:
-    """True if Google OAuth credentials exist in secrets."""
+    """True only when auth secrets are present and not placeholders."""
     try:
-        return bool(st.secrets.get("auth", {}).get("client_id", ""))
+        auth = st.secrets.get("auth", {})
+        required = (
+            auth.get("client_id", ""),
+            auth.get("client_secret", ""),
+            auth.get("cookie_secret", ""),
+        )
+        return all(not _is_missing_or_placeholder(v) for v in required)
     except Exception:
         return False
+
+
+def _has_auth_block_but_invalid() -> bool:
+    """Detect partially configured auth blocks so we can show a helpful message."""
+    try:
+        auth = st.secrets.get("auth", {})
+        if not auth:
+            return False
+        required = (
+            auth.get("client_id", ""),
+            auth.get("client_secret", ""),
+            auth.get("cookie_secret", ""),
+        )
+        return any(_is_missing_or_placeholder(v) for v in required)
+    except Exception:
+        return False
+
+
+def _handle_login() -> None:
+    """Run Streamlit login with a user-facing error instead of a full traceback."""
+    try:
+        st.login()
+    except Exception as exc:
+        st.error(
+            "Google login failed. Check auth.client_id, auth.client_secret, cookie_secret, and redirect URI in Streamlit secrets.",
+            icon="🚫",
+        )
+        st.caption(str(exc))
 
 
 def _current_user_email() -> str:
@@ -74,12 +122,20 @@ if not os.getenv("ANTHROPIC_API_KEY"):
 # Login gate — only shown when OAuth is configured
 # ---------------------------------------------------------------------------
 _AUTH_CONFIGURED = _auth_is_configured()
+_AUTH_INVALID = _has_auth_block_but_invalid()
+
+if _AUTH_INVALID:
+    st.info(
+        "OAuth is disabled locally because auth secrets are missing or placeholder values were detected. "
+        "Set real values under [auth] in .streamlit/secrets.toml to enable Google sign-in.",
+        icon="ℹ️",
+    )
 
 if _AUTH_CONFIGURED:
     if not st.user.is_logged_in:
         st.markdown("## Solution Factory")
         st.markdown("Sign in to save and access your session history.")
-        st.button("Sign in with Google", on_click=st.login, type="primary")
+        st.button("Sign in with Google", on_click=_handle_login, type="primary")
         st.stop()
 
 _USER_EMAIL = _current_user_email()
@@ -705,6 +761,46 @@ def score_exploration_path(path: dict) -> dict:
 
 
 # ====================================================================
+# Trending helper
+# ====================================================================
+
+@st.cache_data(ttl=3600)
+def get_trending_topics() -> list[dict]:
+    """Fetch what's trending across domains (cached for 1 hour).
+    
+    Returns list of dicts with keys: title, why_trending, signal.
+    """
+    trending = [
+        {
+            "title": "AI-Powered Supply Chain Optimization",
+            "why_trending": "Post-pandemic logistics consolidation + efficiency pressure.",
+            "signal": "📦 Tech + Operations",
+        },
+        {
+            "title": "Mental Health in Enterprise",
+            "why_trending": "Burnout + regulatory pressure + insurance mandates.",
+            "signal": "💼 Health + Work",
+        },
+        {
+            "title": "Biotech Data Infrastructure",
+            "why_trending": "AI-driven drug discovery requires massive biomarker pipelines.",
+            "signal": "🧬 AI + Biology",
+        },
+        {
+            "title": "Fintech for Emerging Markets",
+            "why_trending": "Mobile-first payments + stablecoins for unbanked populations.",
+            "signal": "💰 Mobile + Finance",
+        },
+        {
+            "title": "Autonomous Delivery Networks",
+            "why_trending": "Last-mile robotics solves labor shortage + cost crisis.",
+            "signal": "🤖 Robotics + Logistics",
+        },
+    ]
+    return trending
+
+
+# ====================================================================
 # Main UI
 # ====================================================================
 
@@ -716,7 +812,37 @@ step = st.session_state.step
 # STEP 1: Prompt input
 # ------------------------------------------------------------------
 if step == "prompt":
-    st.markdown("Enter a broad domain, idea, or problem. I'll help you explore angles before we dive deep.")
+    st.markdown("## Discover & Explore")
+    st.markdown("Enter a domain, idea, or problem. Or pick what's trending now.")
+
+    # Trending Now section
+    st.markdown("### 🔥 Trending Now")
+    st.caption("Click any topic to auto-populate the form")
+
+    trending_topics = get_trending_topics()
+    trending_cols = st.columns(len(trending_topics))
+
+    for col, trend in zip(trending_cols, trending_topics):
+        with col:
+            if st.button(
+                f"{trend['title']}",
+                key=f"trending_{trend['title']}",
+                use_container_width=True,
+                help=trend["why_trending"],
+            ):
+                st.session_state.context = {
+                    "user_prompt": trend["title"].strip(),
+                    "production_stage": "Backlog",
+                    "exploration_mode": "online_trends",
+                    "owner_email": _USER_EMAIL,
+                }
+                st.session_state.exploration_mode = "online_trends"
+                st.session_state.step = "exploring"
+                st.rerun()
+            st.caption(f"{trend['signal']}")
+
+    st.divider()
+    st.markdown("### Or Explore Your Own")
 
     with st.form("prompt_form"):
         exploration_mode = st.radio(
