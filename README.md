@@ -97,6 +97,10 @@ Railway will auto-detect Python and install dependencies from `requirements.txt`
 In Railway project variables, add:
 
 - `ANTHROPIC_API_KEY` = your Anthropic API key
+- `GOOGLE_CLIENT_ID` = OAuth client ID (for login)
+- `GOOGLE_CLIENT_SECRET` = OAuth client secret
+- `COOKIE_SECRET` = random 32+ char secret for auth cookies
+- `DATABASE_URL` = Railway Postgres connection URL (recommended for persistent session history)
 
 ### 4) Deploy
 
@@ -111,6 +115,8 @@ After deploy finishes, open the generated Railway URL.
 - Streamlit must bind to `0.0.0.0` and use Railway's `$PORT`.
 - Keep secrets only in Railway Variables, never in Git.
 - If your app cannot reach Anthropic, confirm `ANTHROPIC_API_KEY` exists in Railway.
+- Session history uses Postgres automatically when `DATABASE_URL` or `SESSION_DATABASE_URL` is set.
+- If no DB URL is configured, session history falls back to filesystem storage in `output/sessions/`.
 
 ## Stack
 
