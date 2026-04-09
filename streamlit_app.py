@@ -35,12 +35,60 @@ from utils.trend_metrics import render_exploration_metrics, render_trend_metrics
 # Auth helpers
 # ---------------------------------------------------------------------------
 
+_AUTH_PLACEHOLDER_PREFIXES = (
+    "REPLACE_WITH_",
+    "YOUR_",
+    "CHANGE_ME",
+)
+
+
+def _is_missing_or_placeholder(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return True
+    upper = text.upper()
+    return any(prefix in upper for prefix in _AUTH_PLACEHOLDER_PREFIXES)
+
 def _auth_is_configured() -> bool:
-    """True if Google OAuth credentials exist in secrets."""
+    """True only when auth secrets are present and not placeholders."""
     try:
-        return bool(st.secrets.get("auth", {}).get("client_id", ""))
+        auth = st.secrets.get("auth", {})
+        required = (
+            auth.get("client_id", ""),
+            auth.get("client_secret", ""),
+            auth.get("cookie_secret", ""),
+        )
+        return all(not _is_missing_or_placeholder(v) for v in required)
     except Exception:
         return False
+
+
+def _has_auth_block_but_invalid() -> bool:
+    """Detect partially configured auth blocks so we can show a helpful message."""
+    try:
+        auth = st.secrets.get("auth", {})
+        if not auth:
+            return False
+        required = (
+            auth.get("client_id", ""),
+            auth.get("client_secret", ""),
+            auth.get("cookie_secret", ""),
+        )
+        return any(_is_missing_or_placeholder(v) for v in required)
+    except Exception:
+        return False
+
+
+def _handle_login() -> None:
+    """Run Streamlit login with a user-facing error instead of a full traceback."""
+    try:
+        st.login()
+    except Exception as exc:
+        st.error(
+            "Google login failed. Check auth.client_id, auth.client_secret, cookie_secret, and redirect URI in Streamlit secrets.",
+            icon="🚫",
+        )
+        st.caption(str(exc))
 
 
 def _current_user_email() -> str:
@@ -74,12 +122,20 @@ if not os.getenv("ANTHROPIC_API_KEY"):
 # Login gate — only shown when OAuth is configured
 # ---------------------------------------------------------------------------
 _AUTH_CONFIGURED = _auth_is_configured()
+_AUTH_INVALID = _has_auth_block_but_invalid()
+
+if _AUTH_INVALID:
+    st.info(
+        "OAuth is disabled locally because auth secrets are missing or placeholder values were detected. "
+        "Set real values under [auth] in .streamlit/secrets.toml to enable Google sign-in.",
+        icon="ℹ️",
+    )
 
 if _AUTH_CONFIGURED:
     if not st.user.is_logged_in:
         st.markdown("## Solution Factory")
         st.markdown("Sign in to save and access your session history.")
-        st.button("Sign in with Google", on_click=st.login, type="primary")
+        st.button("Sign in with Google", on_click=_handle_login, type="primary")
         st.stop()
 
 _USER_EMAIL = _current_user_email()
