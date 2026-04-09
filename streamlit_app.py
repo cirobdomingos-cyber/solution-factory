@@ -26,7 +26,8 @@ from agents.validator import ValidationAgent
 from agents.architect import SolutionArchitectAgent
 from agents.execution_planner import ExecutionPlannerAgent
 from agents.critic import CriticalReviewAgent
-from utils.export import export_results
+from utils.export import export_results, save_session, list_sessions, load_session
+from utils.pdf_export import build_pdf_bytes
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -107,15 +108,33 @@ with st.sidebar:
             st.markdown(f"  :gray[Phase {num}: {label}]")
 
     st.divider()
-    st.subheader("History")
-    if st.session_state.history:
-        for entry in reversed(st.session_state.history):
-            preview = entry["prompt"][:50] + ("..." if len(entry["prompt"]) > 50 else "")
-            v = entry.get("verdict", "?")
+    st.subheader("Session History")
+    saved_sessions = list_sessions()
+    if saved_sessions:
+        for s in saved_sessions[:10]:  # cap at 10
+            v = s.get("verdict", "")
             color = {"go": "green", "conditional_go": "orange", "no_go": "red"}.get(v, "gray")
-            st.markdown(f":{color}[**{v.upper()}**] {preview}")
+            verdict_label = {"go": "GO", "conditional_go": "COND", "no_go": "NO GO"}.get(v, "WIP")
+            prompt_preview = (s.get("user_prompt") or "")[:40]
+            ts = (s.get("timestamp") or "")[:10]
+            with st.expander(f":{color}[{verdict_label}] {prompt_preview}", expanded=False):
+                st.caption(ts)
+                concept = s.get("selected_concept") or ""
+                if concept:
+                    st.caption(f"Concept: {concept[:60]}")
+                score = s.get("score") or 0
+                if score:
+                    st.caption(f"Score: {score}/10")
+                if st.button("Open session", key=f"open_{s['filename']}", use_container_width=True):
+                    ctx_loaded, phase_loaded = load_session(s["path"])
+                    for k, dv in DEFAULTS.items():
+                        st.session_state[k] = dv
+                    st.session_state.context = ctx_loaded
+                    st.session_state.current_phase = phase_loaded
+                    st.session_state.step = "pipeline"
+                    st.rerun()
     else:
-        st.caption("No completed runs yet.")
+        st.caption("No saved sessions yet.")
 
     if step != "prompt":
         st.divider()
@@ -764,6 +783,12 @@ if 0 <= st.session_state.current_phase < TOTAL_PHASES:
                     st.session_state.context = ctx
                     if not ctx.pop("_phase_failed", False):
                         st.session_state.current_phase = next_phase_idx
+                        # Auto-save session after critical review completes
+                        if PHASES[next_phase_idx]["key"] == "critical_review":
+                            try:
+                                save_session(ctx, next_phase_idx)
+                            except Exception:
+                                pass
                     st.rerun()
 
                 elif action == "rerun":
@@ -807,19 +832,29 @@ if 0 <= st.session_state.current_phase < TOTAL_PHASES:
 
                 elif action == "export":
                     filepath = export_results(ctx)
-                    st.session_state.history.append({
-                        "prompt": ctx.get("user_prompt", "?"),
-                        "verdict": ctx.get("critical_review", {}).get("go_no_go", "?"),
-                        "score": ctx.get("critical_review", {}).get("score", 0),
-                    })
-                    st.success(f"Exported to `{filepath}`")
-                    st.download_button(
-                        "Download JSON",
-                        data=json.dumps(ctx, indent=2, ensure_ascii=False, default=str),
-                        file_name="solution_factory_result.json",
-                        mime="application/json",
-                        key="download_final",
-                    )
+                    session_path = save_session(ctx, st.session_state.current_phase)
+                    st.success(f"Exported to `{filepath}` — session saved for history.")
+                    dl_col1, dl_col2 = st.columns(2)
+                    with dl_col1:
+                        st.download_button(
+                            "Download JSON",
+                            data=json.dumps(ctx, indent=2, ensure_ascii=False, default=str),
+                            file_name="solution_factory_result.json",
+                            mime="application/json",
+                            key="download_final_json",
+                        )
+                    with dl_col2:
+                        try:
+                            pdf_bytes = build_pdf_bytes(ctx)
+                            st.download_button(
+                                "Download PDF",
+                                data=pdf_bytes,
+                                file_name="solution_factory_report.pdf",
+                                mime="application/pdf",
+                                key="download_final_pdf",
+                            )
+                        except Exception as pdf_err:
+                            st.warning(f"PDF generation failed: {pdf_err}")
 
                 elif action == "reset":
                     for k, v in DEFAULTS.items():
