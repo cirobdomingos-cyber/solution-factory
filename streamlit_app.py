@@ -662,6 +662,50 @@ def run_single_phase(phase_idx: int, ctx: dict, user_notes: str = "") -> dict:
     return ctx
 
 
+def score_exploration_path(path: dict) -> dict:
+    """Compute a compact why-this-path score for fast selection decisions."""
+    momentum = str(path.get("momentum", "warm")).lower()
+    momentum_score = {"hot": 3, "warm": 2, "cool": 1}.get(momentum, 1)
+
+    combined_text = " ".join([
+        str(path.get("opportunity_hypothesis", "")),
+        str(path.get("why_now", "")),
+        " ".join(path.get("source_signals", []) or []),
+    ]).lower()
+
+    pain_keywords = {
+        "pain", "problem", "complaint", "cost", "wait", "shortage", "burnout",
+        "dropout", "churn", "risk", "compliance", "inefficiency", "friction",
+    }
+    pain_hits = sum(1 for kw in pain_keywords if kw in combined_text)
+    buyer_pain_score = 3 if pain_hits >= 3 else 2 if pain_hits >= 1 else 1
+
+    feasibility_text = (
+        f"{path.get('mid_area', '')} {path.get('narrow_area', '')} "
+        f"{path.get('opportunity_hypothesis', '')}"
+    ).lower()
+    low_feasibility_terms = {
+        "drug", "biotech", "clinical trial", "implant", "hardware", "medical device"
+    }
+    high_feasibility_terms = {
+        "saas", "workflow", "platform", "automation", "assistant", "analytics", "copilot"
+    }
+    if any(term in feasibility_text for term in low_feasibility_terms):
+        feasibility_score = 1
+    elif any(term in feasibility_text for term in high_feasibility_terms):
+        feasibility_score = 3
+    else:
+        feasibility_score = 2
+
+    total = momentum_score + buyer_pain_score + feasibility_score
+    return {
+        "momentum": momentum_score,
+        "buyer_pain": buyer_pain_score,
+        "feasibility": feasibility_score,
+        "total": total,
+    }
+
+
 # ====================================================================
 # Main UI
 # ====================================================================
@@ -802,7 +846,8 @@ if step == "explored":
                 momentum_color = MOMENTUM_COLORS.get(momentum, "gray")
 
                 label = f"{broad} -> {mid} -> {narrow}"
-                col_check, col_content = st.columns([0.05, 0.95])
+                score = score_exploration_path(path)
+                col_check, col_content, col_score = st.columns([0.05, 0.75, 0.20])
                 with col_check:
                     checked = st.checkbox(
                         label,
@@ -828,6 +873,18 @@ if step == "explored":
                                 st.markdown("**Starter queries**")
                                 for q in queries:
                                     st.markdown(f"- {q}")
+                with col_score:
+                    st.markdown("**Why this path**")
+                    st.caption(
+                        " | ".join(
+                            [
+                                f"M {score['momentum']}/3",
+                                f"Pain {score['buyer_pain']}/3",
+                                f"Build {score['feasibility']}/3",
+                            ]
+                        )
+                    )
+                    st.metric("Total", f"{score['total']}/9")
 
                 if checked:
                     selected_labels.append(label)
