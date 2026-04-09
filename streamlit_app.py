@@ -19,6 +19,7 @@ import traceback
 import streamlit as st
 
 from agents.topic_explorer import TopicExplorerAgent
+from agents.trend_explorer import OnlineTrendExplorerAgent
 from agents.trend_researcher import TrendResearchAgent
 from agents.market_intel import MarketIntelligenceAgent
 from agents.ideator import IdeationAgent
@@ -26,8 +27,30 @@ from agents.validator import ValidationAgent
 from agents.architect import SolutionArchitectAgent
 from agents.execution_planner import ExecutionPlannerAgent
 from agents.critic import CriticalReviewAgent
-from utils.export import export_results, save_session, list_sessions, load_session
+from utils.export import export_results, save_session, list_sessions, load_session, update_idea_stage
 from utils.pdf_export import build_pdf_bytes
+
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+def _auth_is_configured() -> bool:
+    """True if Google OAuth credentials exist in secrets."""
+    try:
+        return bool(st.secrets.get("auth", {}).get("client_id", ""))
+    except Exception:
+        return False
+
+
+def _current_user_email() -> str:
+    """Return the logged-in user's email, or empty string if not logged in / no auth."""
+    try:
+        if st.user.is_logged_in:
+            return st.user.email or ""
+    except Exception:
+        pass
+    return ""
+
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -45,6 +68,61 @@ if not os.getenv("ANTHROPIC_API_KEY"):
         "The UI will load, but pipeline calls will fail without this key.",
         icon="⚠️",
     )
+
+# ---------------------------------------------------------------------------
+# Login gate — only shown when OAuth is configured
+# ---------------------------------------------------------------------------
+_AUTH_CONFIGURED = _auth_is_configured()
+
+if _AUTH_CONFIGURED:
+    if not st.user.is_logged_in:
+        st.markdown("## Solution Factory")
+        st.markdown("Sign in to save and access your session history.")
+        st.button("Sign in with Google", on_click=st.login, type="primary")
+        st.stop()
+
+_USER_EMAIL = _current_user_email()
+LIFECYCLE_STAGES = [
+    "Backlog",
+    "Discovery",
+    "Validation",
+    "Architecture",
+    "Build Plan",
+    "Ready for Build",
+    "Needs Revision",
+    "Parked",
+]
+
+
+def _phase_to_stage(current_phase: int, context: dict) -> str:
+    """Map phase index to a user-facing production stage."""
+    if current_phase < 0:
+        return "Backlog"
+
+    phase_stage = {
+        0: "Discovery",
+        1: "Discovery",
+        2: "Validation",
+        3: "Validation",
+        4: "Architecture",
+        5: "Build Plan",
+    }
+
+    if current_phase == 6:
+        verdict = context.get("critical_review", {}).get("go_no_go", "")
+        return {
+            "go": "Ready for Build",
+            "conditional_go": "Needs Revision",
+            "no_go": "Parked",
+        }.get(verdict, "Review")
+
+    return phase_stage.get(current_phase, "In Progress")
+
+
+def _checkpoint_session(context: dict, current_phase: int) -> None:
+    """Persist an incremental checkpoint for long-running sessions."""
+    context["production_stage"] = _phase_to_stage(current_phase, context)
+    save_session(context, current_phase, user_email=_USER_EMAIL)
 
 # ---------------------------------------------------------------------------
 # Phase registry (Phase 0-6, exploration is pre-phase)
@@ -70,7 +148,9 @@ DEFAULTS = {
     # Exploration state
     "step": "prompt",              # "prompt" | "exploring" | "explored" | "pipeline"
     "exploration_angles": [],
+    "exploration_paths": [],
     "exploration_domain": "",
+    "exploration_mode": "brainstorm",
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -83,6 +163,12 @@ for k, v in DEFAULTS.items():
 with st.sidebar:
     st.title("Solution Factory")
     st.caption("Step-by-step idea-to-execution pipeline")
+
+    if _AUTH_CONFIGURED and _USER_EMAIL:
+        st.divider()
+        st.caption(f"Signed in as **{st.user.name}**")
+        st.caption(_USER_EMAIL)
+        st.button("Sign out", on_click=st.logout, use_container_width=True)
 
     st.divider()
     st.subheader("Pipeline Progress")
@@ -109,7 +195,70 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Session History")
-    saved_sessions = list_sessions()
+    saved_sessions = list_sessions(user_email=_USER_EMAIL)
+    if saved_sessions:
+        stage_counts: dict[str, int] = {}
+        for s in saved_sessions:
+            stage = s.get("production_stage", "Unknown")
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        st.caption("Ideas by stage")
+        for stage, count in sorted(stage_counts.items(), key=lambda x: x[0]):
+            st.markdown(f"- {stage}: {count}")
+
+        latest_by_idea: dict[str, dict] = {}
+        for session in saved_sessions:
+            idea_key = session.get("idea_id") or session.get("filename", "")
+            if idea_key and idea_key not in latest_by_idea:
+                latest_by_idea[idea_key] = session
+
+        st.divider()
+        st.subheader("Production Board")
+        stage_filter = st.selectbox(
+            "Filter stage",
+            ["All"] + LIFECYCLE_STAGES,
+            key="production_board_stage_filter",
+        )
+
+        board_items = list(latest_by_idea.values())
+        if stage_filter != "All":
+            board_items = [
+                item for item in board_items
+                if item.get("production_stage", "Unknown") == stage_filter
+            ]
+
+        if board_items:
+            for item in board_items[:8]:
+                idea_id = item.get("idea_id") or item.get("filename", "")
+                current_stage = item.get("production_stage") or "Backlog"
+                title = (item.get("user_prompt") or "Untitled idea")[:48]
+                st.markdown(f"**{title}**")
+                st.caption(f"{idea_id} | {current_stage}")
+
+                move_col, action_col = st.columns([2, 1])
+                with move_col:
+                    default_idx = LIFECYCLE_STAGES.index(current_stage) if current_stage in LIFECYCLE_STAGES else 0
+                    target_stage = st.selectbox(
+                        "Move to",
+                        LIFECYCLE_STAGES,
+                        index=default_idx,
+                        key=f"stage_target_{idea_id}",
+                        label_visibility="collapsed",
+                    )
+                with action_col:
+                    if st.button("Update", key=f"stage_apply_{idea_id}", use_container_width=True):
+                        updated_count = update_idea_stage(
+                            idea_id=idea_id,
+                            new_stage=target_stage,
+                            user_email=_USER_EMAIL,
+                        )
+                        if updated_count:
+                            st.success(f"Updated {updated_count} session(s).")
+                        else:
+                            st.warning("No matching sessions to update.")
+                        st.rerun()
+        else:
+            st.caption("No ideas in this stage yet.")
+
     if saved_sessions:
         for s in saved_sessions[:10]:  # cap at 10
             v = s.get("verdict", "")
@@ -117,8 +266,13 @@ with st.sidebar:
             verdict_label = {"go": "GO", "conditional_go": "COND", "no_go": "NO GO"}.get(v, "WIP")
             prompt_preview = (s.get("user_prompt") or "")[:40]
             ts = (s.get("timestamp") or "")[:10]
+            stage = s.get("production_stage") or "Unknown"
             with st.expander(f":{color}[{verdict_label}] {prompt_preview}", expanded=False):
                 st.caption(ts)
+                st.caption(f"Stage: {stage}")
+                idea_id = s.get("idea_id") or ""
+                if idea_id:
+                    st.caption(f"Idea ID: {idea_id}")
                 concept = s.get("selected_concept") or ""
                 if concept:
                     st.caption(f"Concept: {concept[:60]}")
@@ -523,15 +677,34 @@ if step == "prompt":
     st.markdown("Enter a broad domain, idea, or problem. I'll help you explore angles before we dive deep.")
 
     with st.form("prompt_form"):
+        exploration_mode = st.radio(
+            "Exploration mode",
+            options=["brainstorm", "online_trends"],
+            format_func=lambda v: (
+                "Fast brainstorming (LLM ideation)"
+                if v == "brainstorm"
+                else "Live online trend scan (broad to narrow)"
+            ),
+            help="Online trend scan uses live web search to propose exploration paths from broad areas to narrow niches.",
+            horizontal=True,
+            key="exploration_mode_input",
+        )
         user_prompt = st.text_area(
             "What domain do you want to explore?",
             placeholder="e.g. health and wellbeing, AI in logistics, fintech for freelancers...",
             height=100,
+            max_chars=5000,
         )
         submitted = st.form_submit_button("Explore Topics", type="primary", use_container_width=True)
 
     if submitted and user_prompt.strip():
-        st.session_state.context = {"user_prompt": user_prompt.strip()}
+        st.session_state.context = {
+            "user_prompt": user_prompt.strip(),
+            "production_stage": "Backlog",
+            "exploration_mode": exploration_mode,
+            "owner_email": _USER_EMAIL,
+        }
+        st.session_state.exploration_mode = exploration_mode
         st.session_state.step = "exploring"
         st.rerun()
     elif submitted:
@@ -543,18 +716,30 @@ if step == "prompt":
 # ------------------------------------------------------------------
 if step == "exploring":
     ctx = st.session_state.context
+    exploration_mode = ctx.get("exploration_mode", st.session_state.exploration_mode)
     st.markdown(f"> **Domain:** {ctx['user_prompt']}")
     st.divider()
 
-    with st.status("Exploring topic angles...", expanded=True) as status:
-        agent = TopicExplorerAgent()
-        st.caption(f"Agent: **{agent.name}** | Model: `{agent.model}` (fast brainstorming)")
+    status_text = (
+        "Scanning live trends and generating broad-to-narrow paths..."
+        if exploration_mode == "online_trends"
+        else "Exploring topic angles..."
+    )
+
+    with st.status(status_text, expanded=True) as status:
+        if exploration_mode == "online_trends":
+            agent = OnlineTrendExplorerAgent()
+            st.caption(f"Agent: **{agent.name}** | Model: `{agent.model}` (live web trend scan)")
+        else:
+            agent = TopicExplorerAgent()
+            st.caption(f"Agent: **{agent.name}** | Model: `{agent.model}` (fast brainstorming)")
         start = time.time()
         try:
             result = agent.run(ctx)
             ctx.update(result)
             st.session_state.context = ctx
             st.session_state.exploration_angles = result.get("exploration_angles", [])
+            st.session_state.exploration_paths = result.get("exploration_paths", [])
             st.session_state.exploration_domain = result.get("exploration_domain", ctx["user_prompt"])
             elapsed = time.time() - start
             status.update(label=f"Topic exploration — {elapsed:.1f}s", state="complete", expanded=False)
@@ -577,61 +762,116 @@ if step == "exploring":
 # ------------------------------------------------------------------
 if step == "explored":
     ctx = st.session_state.context
+    exploration_mode = ctx.get("exploration_mode", st.session_state.exploration_mode)
     angles = st.session_state.exploration_angles
+    paths = st.session_state.exploration_paths
     domain = st.session_state.exploration_domain
 
     st.markdown(f"> **Domain:** {ctx['user_prompt']}")
     st.divider()
 
     st.subheader("Topic Exploration")
-    st.markdown(
-        f"I found **{len(angles)} angles** to explore in **{domain}**. "
-        f"Select the ones that interest you — these will focus the trend research."
-    )
 
-    # Group angles by category
-    categories: dict[str, list] = {}
-    for angle in angles:
-        cat = angle.get("category", "other")
-        categories.setdefault(cat, []).append(angle)
+    if exploration_mode == "online_trends":
+        st.markdown(
+            f"I found **{len(paths)} broad-to-narrow paths** based on live online signals in **{domain}**. "
+            "Pick the paths you want to investigate first."
+        )
+    else:
+        st.markdown(
+            f"I found **{len(angles)} angles** to explore in **{domain}**. "
+            f"Select the ones that interest you — these will focus the trend research."
+        )
 
-    CATEGORY_ICONS = {
-        "technology": "💡", "audience": "👥", "pain_point": "🎯",
-        "business_model": "💰", "regulation": "📋", "emerging_niche": "🌱",
-    }
-    HEAT_COLORS = {"hot": "red", "warm": "orange", "cool": "blue"}
+    selected_labels = []
 
-    # Render angles with checkboxes
-    selected_angles = []
+    if exploration_mode == "online_trends":
+        grouped_paths: dict[str, list[tuple[int, dict]]] = {}
+        for idx, path in enumerate(paths):
+            broad = path.get("broad_area", "Other")
+            grouped_paths.setdefault(broad, []).append((idx, path))
 
-    for cat, cat_angles in categories.items():
-        icon = CATEGORY_ICONS.get(cat, "📌")
-        st.markdown(f"### {icon} {cat.replace('_', ' ').title()}")
+        MOMENTUM_COLORS = {"hot": "red", "warm": "orange", "cool": "blue"}
 
-        for angle in cat_angles:
-            title = angle.get("title", "?")
-            desc = angle.get("description", "")
-            heat = angle.get("heat_level", "warm")
-            heat_color = HEAT_COLORS.get(heat, "gray")
-            questions = angle.get("example_questions", [])
+        for broad, broad_paths in grouped_paths.items():
+            st.markdown(f"### 🌐 {broad}")
+            for idx, path in broad_paths:
+                mid = path.get("mid_area", "?")
+                narrow = path.get("narrow_area", "?")
+                momentum = path.get("momentum", "warm")
+                momentum_color = MOMENTUM_COLORS.get(momentum, "gray")
 
-            col_check, col_content = st.columns([0.05, 0.95])
-            with col_check:
-                checked = st.checkbox(
-                    title,
-                    key=f"angle_{title}",
-                    label_visibility="collapsed",
-                )
-            with col_content:
-                st.markdown(f"**{title}** :{heat_color}[{heat}]")
-                st.markdown(desc)
-                if questions:
-                    with st.expander("Research questions"):
-                        for q in questions:
-                            st.markdown(f"- {q}")
+                label = f"{broad} -> {mid} -> {narrow}"
+                col_check, col_content = st.columns([0.05, 0.95])
+                with col_check:
+                    checked = st.checkbox(
+                        label,
+                        key=f"path_{idx}",
+                        label_visibility="collapsed",
+                    )
+                with col_content:
+                    st.markdown(f"**{mid} -> {narrow}** :{momentum_color}[{momentum}]")
+                    hypothesis = path.get("opportunity_hypothesis", "")
+                    why_now = path.get("why_now", "")
+                    if hypothesis:
+                        st.markdown(f"**Opportunity hypothesis:** {hypothesis}")
+                    if why_now:
+                        st.markdown(f"**Why now:** {why_now}")
 
-            if checked:
-                selected_angles.append(angle)
+                    signals = path.get("source_signals", [])
+                    queries = path.get("starter_queries", [])
+                    if signals or queries:
+                        with st.expander("Signals and starter queries"):
+                            for s in signals:
+                                st.markdown(f"- {s}")
+                            if queries:
+                                st.markdown("**Starter queries**")
+                                for q in queries:
+                                    st.markdown(f"- {q}")
+
+                if checked:
+                    selected_labels.append(label)
+    else:
+        # Group angles by category
+        categories: dict[str, list] = {}
+        for angle in angles:
+            cat = angle.get("category", "other")
+            categories.setdefault(cat, []).append(angle)
+
+        CATEGORY_ICONS = {
+            "technology": "💡", "audience": "👥", "pain_point": "🎯",
+            "business_model": "💰", "regulation": "📋", "emerging_niche": "🌱",
+        }
+        HEAT_COLORS = {"hot": "red", "warm": "orange", "cool": "blue"}
+
+        for cat, cat_angles in categories.items():
+            icon = CATEGORY_ICONS.get(cat, "📌")
+            st.markdown(f"### {icon} {cat.replace('_', ' ').title()}")
+
+            for angle in cat_angles:
+                title = angle.get("title", "?")
+                desc = angle.get("description", "")
+                heat = angle.get("heat_level", "warm")
+                heat_color = HEAT_COLORS.get(heat, "gray")
+                questions = angle.get("example_questions", [])
+
+                col_check, col_content = st.columns([0.05, 0.95])
+                with col_check:
+                    checked = st.checkbox(
+                        title,
+                        key=f"angle_{title}",
+                        label_visibility="collapsed",
+                    )
+                with col_content:
+                    st.markdown(f"**{title}** :{heat_color}[{heat}]")
+                    st.markdown(desc)
+                    if questions:
+                        with st.expander("Research questions"):
+                            for q in questions:
+                                st.markdown(f"- {q}")
+
+                if checked:
+                    selected_labels.append(title)
 
     st.divider()
 
@@ -643,8 +883,8 @@ if step == "explored":
     )
 
     # Summary of selection
-    if selected_angles or custom_angle.strip():
-        n_selected = len(selected_angles) + (1 if custom_angle.strip() else 0)
+    if selected_labels or custom_angle.strip():
+        n_selected = len(selected_labels) + (1 if custom_angle.strip() else 0)
         st.info(f"**{n_selected} angle(s) selected.** These will focus the trend research.")
 
     st.divider()
@@ -654,10 +894,10 @@ if step == "explored":
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if st.button("Research selected angles", type="primary", use_container_width=True,
+        if st.button("Research selected areas", type="primary", use_container_width=True,
                       help="Run live trend research focused on your selected angles."):
             # Build focused prompt from selections
-            focus_parts = [a.get("title", "") for a in selected_angles]
+            focus_parts = list(selected_labels)
             if custom_angle.strip():
                 focus_parts.append(custom_angle.strip())
 
@@ -669,7 +909,7 @@ if step == "explored":
                 focused_prompt = ctx["user_prompt"]
 
             ctx["user_prompt"] = focused_prompt
-            ctx["selected_exploration_angles"] = [a.get("title", "") for a in selected_angles]
+            ctx["selected_exploration_angles"] = list(selected_labels)
             if custom_angle.strip():
                 ctx["selected_exploration_angles"].append(custom_angle.strip())
             st.session_state.context = ctx
@@ -678,7 +918,7 @@ if step == "explored":
             st.rerun()
 
     with col2:
-        if st.button("Explore more angles", use_container_width=True,
+        if st.button("Explore more", use_container_width=True,
                       help="Re-run the topic explorer for different suggestions."):
             st.session_state.step = "exploring"
             st.rerun()
@@ -717,6 +957,10 @@ if next_phase_idx == 0:
     st.session_state.context = ctx
     if not ctx.pop("_phase_failed", False):
         st.session_state.current_phase = 0
+        try:
+            _checkpoint_session(ctx, 0)
+        except Exception:
+            pass
     st.rerun()
 
 # -- Show completed phases as collapsed sections --
@@ -783,18 +1027,21 @@ if 0 <= st.session_state.current_phase < TOTAL_PHASES:
                     st.session_state.context = ctx
                     if not ctx.pop("_phase_failed", False):
                         st.session_state.current_phase = next_phase_idx
-                        # Auto-save session after critical review completes
-                        if PHASES[next_phase_idx]["key"] == "critical_review":
-                            try:
-                                save_session(ctx, next_phase_idx)
-                            except Exception:
-                                pass
+                        try:
+                            _checkpoint_session(ctx, next_phase_idx)
+                        except Exception:
+                            pass
                     st.rerun()
 
                 elif action == "rerun":
                     ctx = run_single_phase(st.session_state.current_phase, ctx, user_notes)
                     st.session_state.context = ctx
-                    ctx.pop("_phase_failed", None)
+                    failed = ctx.pop("_phase_failed", None)
+                    if not failed and st.session_state.current_phase >= 0:
+                        try:
+                            _checkpoint_session(ctx, st.session_state.current_phase)
+                        except Exception:
+                            pass
                     st.rerun()
 
                 elif action == "skip_trends":
@@ -804,6 +1051,10 @@ if 0 <= st.session_state.current_phase < TOTAL_PHASES:
                     st.session_state.context = ctx
                     if not ctx.pop("_phase_failed", False):
                         st.session_state.current_phase = next_phase_idx
+                        try:
+                            _checkpoint_session(ctx, next_phase_idx)
+                        except Exception:
+                            pass
                     st.rerun()
 
                 elif action == "back_to_ideation":
@@ -818,6 +1069,10 @@ if 0 <= st.session_state.current_phase < TOTAL_PHASES:
                     st.session_state.context = ctx
                     if not ctx.pop("_phase_failed", False):
                         st.session_state.current_phase = 2
+                        try:
+                            _checkpoint_session(ctx, 2)
+                        except Exception:
+                            pass
                     st.rerun()
 
                 elif action == "restart_with_feedback":
@@ -828,11 +1083,15 @@ if 0 <= st.session_state.current_phase < TOTAL_PHASES:
                     st.session_state.context = ctx
                     if not ctx.pop("_phase_failed", False):
                         st.session_state.current_phase = 1
+                        try:
+                            _checkpoint_session(ctx, 1)
+                        except Exception:
+                            pass
                     st.rerun()
 
                 elif action == "export":
                     filepath = export_results(ctx)
-                    session_path = save_session(ctx, st.session_state.current_phase)
+                    session_path = save_session(ctx, st.session_state.current_phase, user_email=_USER_EMAIL)
                     st.success(f"Exported to `{filepath}` — session saved for history.")
                     dl_col1, dl_col2 = st.columns(2)
                     with dl_col1:
