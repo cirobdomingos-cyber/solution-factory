@@ -4,3 +4,4 @@ rich>=13.0.0
 python-dotenv>=1.0.0
 streamlit>=1.40.0
 fpdf2>=2.7.0
+psycopg[binary]>=3.2.0
