@@ -179,7 +179,121 @@ def _phase_to_stage(current_phase: int, context: dict) -> str:
 def _checkpoint_session(context: dict, current_phase: int) -> None:
     """Persist an incremental checkpoint for long-running sessions."""
     context["production_stage"] = _phase_to_stage(current_phase, context)
-    save_session(context, current_phase, user_email=_USER_EMAIL)
+    context["session_path"] = save_session(context, current_phase, user_email=_USER_EMAIL)
+
+
+def _is_credit_balance_error(exc: Exception) -> bool:
+    """Return True for known Anthropic insufficient-credit failures."""
+    text = str(exc).lower()
+    return (
+        "credit balance is too low" in text
+        or "plans & billing" in text
+        or "insufficient" in text and "credit" in text
+    )
+
+
+def _offline_exploration_fallback(domain: str, mode: str) -> dict:
+    """Provide deterministic exploration suggestions when API credits are unavailable."""
+    if mode == "online_trends":
+        paths = [
+            {
+                "broad_area": "Workflow Automation",
+                "mid_area": "Operations Intelligence",
+                "narrow_area": f"Automation copilots for {domain}",
+                "opportunity_hypothesis": "Teams will pay to reduce repetitive tasks and cycle time.",
+                "why_now": "Automation tools and user expectations both accelerated.",
+                "momentum": "warm",
+                "source_signals": [
+                    "Repeated demand for process automation across SMEs.",
+                    "Rising adoption of AI copilots in business software.",
+                ],
+                "starter_queries": [
+                    f"top repetitive workflows in {domain}",
+                    f"{domain} automation pain points reddit",
+                ],
+            },
+            {
+                "broad_area": "Compliance & Risk",
+                "mid_area": "Auditability",
+                "narrow_area": f"Compliance workflows for {domain}",
+                "opportunity_hypothesis": "Risk-heavy domains need simple, auditable systems.",
+                "why_now": "Regulatory pressure is increasing while teams stay lean.",
+                "momentum": "warm",
+                "source_signals": [
+                    "Growing compliance burden in regulated sectors.",
+                    "Budget preference for tools that prevent fines and rework.",
+                ],
+                "starter_queries": [
+                    f"{domain} compliance challenges 2026",
+                    f"audit requirements for {domain} teams",
+                ],
+            },
+            {
+                "broad_area": "Customer Experience",
+                "mid_area": "Response Speed",
+                "narrow_area": f"Faster support and onboarding in {domain}",
+                "opportunity_hypothesis": "Improving first response and onboarding lifts retention.",
+                "why_now": "Users compare every product to best-in-class support experiences.",
+                "momentum": "hot",
+                "source_signals": [
+                    "Support and onboarding delays appear in many review channels.",
+                    "Retention pressure makes CX improvements high-priority.",
+                ],
+                "starter_queries": [
+                    f"{domain} customer onboarding friction",
+                    f"common complaints about {domain} tools",
+                ],
+            },
+        ]
+        broad_areas = []
+        for title in sorted({p["broad_area"] for p in paths}):
+            broad_areas.append(
+                {
+                    "title": title,
+                    "signal_summary": "Generated from local fallback due to API credit limits.",
+                }
+            )
+        return {
+            "exploration_domain": domain,
+            "broad_areas": broad_areas,
+            "exploration_paths": paths,
+        }
+
+    return {
+        "exploration_domain": domain,
+        "exploration_angles": [
+            {
+                "category": "technology",
+                "title": f"AI copilots in {domain}",
+                "description": "Focus on repetitive decisions that can be assisted with structured AI prompts.",
+                "example_questions": [
+                    f"Which tasks in {domain} are rule-based and repetitive?",
+                    f"Where do teams lose the most time each week in {domain}?",
+                ],
+                "heat_level": "warm",
+            },
+            {
+                "category": "pain_point",
+                "title": f"High-friction workflows in {domain}",
+                "description": "Look for bottlenecks causing delays, errors, or rework.",
+                "example_questions": [
+                    f"What workflow in {domain} creates the most rework?",
+                    f"Which handoff fails most often in {domain} teams?",
+                ],
+                "heat_level": "hot",
+            },
+            {
+                "category": "business_model",
+                "title": f"B2B vertical SaaS for {domain}",
+                "description": "Narrow to teams with strong willingness to pay for measurable ROI.",
+                "example_questions": [
+                    f"Who owns budget for {domain} process improvement?",
+                    f"Which KPI improvement would justify a paid tool in {domain}?",
+                ],
+                "heat_level": "warm",
+            },
+        ],
+    }
 
 # ---------------------------------------------------------------------------
 # Phase registry (Phase 0-6, exploration is pre-phase)
@@ -921,6 +1035,30 @@ if step == "exploring":
             st.rerun()
         except Exception as e:
             elapsed = time.time() - start
+            if _is_credit_balance_error(e):
+                fallback = _offline_exploration_fallback(ctx["user_prompt"], exploration_mode)
+                ctx.update(fallback)
+                st.session_state.context = ctx
+                st.session_state.exploration_angles = fallback.get("exploration_angles", [])
+                st.session_state.exploration_paths = fallback.get("exploration_paths", [])
+                st.session_state.exploration_domain = fallback.get("exploration_domain", ctx["user_prompt"])
+                st.session_state.exploration_output = {
+                    "exploration_domain": fallback.get("exploration_domain", ""),
+                    "broad_areas": fallback.get("broad_areas", []),
+                    "exploration_paths": fallback.get("exploration_paths", []),
+                }
+                status.update(
+                    label=f"Topic exploration — API credits unavailable, used offline fallback ({elapsed:.1f}s)",
+                    state="complete",
+                    expanded=False,
+                )
+                st.warning(
+                    "Anthropic credits are currently insufficient. Using offline starter exploration so you can continue.",
+                    icon="⚠️",
+                )
+                st.session_state.step = "explored"
+                st.rerun()
+
             status.update(label=f"Topic exploration — FAILED ({elapsed:.1f}s)", state="error")
             st.error(f"**Topic Explorer** failed: {e}")
             st.code(traceback.format_exc(), language="text")
