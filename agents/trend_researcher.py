@@ -126,6 +126,16 @@ no text outside the JSON object."""
                 logger.warning(f"[{self.name}] Rate limited, waiting {delay}s...")
                 time.sleep(delay)
 
+            except (anthropic.BadRequestError, anthropic.APIStatusError) as e:
+                err_text = str(e).lower()
+                if "credit balance" in err_text or "insufficient" in err_text or "plans & billing" in err_text:
+                    # Re-raise so the caller can show a credit-specific warning
+                    raise
+                logger.error(f"[{self.name}] API error on attempt {attempt}: {e}")
+                if attempt == MAX_RETRIES:
+                    return {"trends": [], "market_sentiment": "unknown", "key_takeaway": "", "_error": str(e)}
+                time.sleep(RETRY_BASE_DELAY)
+
         # Extract the final text block from the response.
         # With server-side web search, the response contains interleaved
         # web_search_tool_result and text blocks. We want the last text block

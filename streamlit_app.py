@@ -27,7 +27,7 @@ from agents.validator import ValidationAgent
 from agents.architect import SolutionArchitectAgent
 from agents.execution_planner import ExecutionPlannerAgent
 from agents.critic import CriticalReviewAgent
-from utils.export import export_results, save_session, list_sessions, load_session, update_idea_stage
+from utils.export import export_results, save_session, list_sessions, load_session, update_idea_stage, delete_session
 from utils.pdf_export import build_pdf_bytes
 from utils.trend_metrics import render_exploration_metrics, render_trend_metrics
 
@@ -431,7 +431,36 @@ with st.sidebar:
             st.caption("No ideas in this stage yet.")
 
     if saved_sessions:
-        for s in saved_sessions[:10]:  # cap at 10
+        st.divider()
+        st.subheader("Manage Previous Sessions")
+        session_query = st.text_input(
+            "Search",
+            placeholder="Search prompt, idea ID, concept...",
+            key="session_manage_query",
+        ).strip().lower()
+        session_stage_filter = st.selectbox(
+            "Session stage",
+            ["All"] + LIFECYCLE_STAGES,
+            key="session_manage_stage_filter",
+        )
+
+        filtered_sessions = saved_sessions
+        if session_stage_filter != "All":
+            filtered_sessions = [
+                s for s in filtered_sessions
+                if (s.get("production_stage") or "") == session_stage_filter
+            ]
+        if session_query:
+            filtered_sessions = [
+                s for s in filtered_sessions
+                if session_query in (s.get("user_prompt") or "").lower()
+                or session_query in (s.get("idea_id") or "").lower()
+                or session_query in (s.get("selected_concept") or "").lower()
+            ]
+
+        st.caption(f"Showing {len(filtered_sessions)} of {len(saved_sessions)} session(s)")
+
+        for s in filtered_sessions[:20]:  # cap at 20
             v = s.get("verdict", "")
             color = {"go": "green", "conditional_go": "orange", "no_go": "red"}.get(v, "gray")
             verdict_label = {"go": "GO", "conditional_go": "COND", "no_go": "NO GO"}.get(v, "WIP")
@@ -450,14 +479,40 @@ with st.sidebar:
                 score = s.get("score") or 0
                 if score:
                     st.caption(f"Score: {score}/10")
-                if st.button("Open session", key=f"open_{s['filename']}", use_container_width=True):
-                    ctx_loaded, phase_loaded = load_session(s["path"])
-                    for k, dv in DEFAULTS.items():
-                        st.session_state[k] = dv
-                    st.session_state.context = ctx_loaded
-                    st.session_state.current_phase = phase_loaded
-                    st.session_state.step = "pipeline"
-                    st.rerun()
+                act_col1, act_col2, act_col3 = st.columns(3)
+                with act_col1:
+                    if st.button("Open", key=f"open_{s['filename']}", use_container_width=True):
+                        ctx_loaded, phase_loaded = load_session(s["path"])
+                        for k, dv in DEFAULTS.items():
+                            st.session_state[k] = dv
+                        st.session_state.context = ctx_loaded
+                        st.session_state.current_phase = phase_loaded
+                        st.session_state.step = "pipeline"
+                        st.rerun()
+                with act_col2:
+                    if st.button("Archive", key=f"archive_{s['filename']}", use_container_width=True):
+                        idea_id = s.get("idea_id") or ""
+                        if not idea_id:
+                            st.warning("This session has no idea ID, cannot archive as investigation.")
+                        else:
+                            updated = update_idea_stage(
+                                idea_id=idea_id,
+                                new_stage="Parked",
+                                user_email=_USER_EMAIL,
+                            )
+                            if updated:
+                                st.success(f"Archived {updated} session(s) for this investigation.")
+                            else:
+                                st.warning("No matching sessions found to archive.")
+                            st.rerun()
+                with act_col3:
+                    if st.button("Delete", key=f"delete_{s['filename']}", use_container_width=True):
+                        deleted = delete_session(path=s["path"], user_email=_USER_EMAIL)
+                        if deleted:
+                            st.success("Session deleted.")
+                        else:
+                            st.warning("Could not delete this session.")
+                        st.rerun()
     else:
         st.caption("No saved sessions yet.")
 
@@ -818,15 +873,44 @@ def run_single_phase(phase_idx: int, ctx: dict, user_notes: str = "") -> dict:
                           state="complete", expanded=False)
         except Exception as e:
             elapsed = time.time() - start
-            status.update(label=f"Phase {phase['num']}: {phase['label']} — FAILED ({elapsed:.1f}s)",
-                          state="error")
-            st.error(f"**{agent.name}** failed: {e}")
-            st.code(traceback.format_exc(), language="text")
-            if not phase["critical"]:
-                if phase["key"] == "trend_research":
-                    ctx.update({"trends": [], "market_sentiment": "unknown", "key_takeaway": ""})
+            if phase["key"] == "trend_research" and _is_credit_balance_error(e):
+                status.update(
+                    label=f"Phase {phase['num']}: {phase['label']} — skipped (API credits unavailable, {elapsed:.1f}s)",
+                    state="complete",
+                    expanded=False,
+                )
+                st.warning(
+                    "⚠️ Phase 0 skipped: Anthropic API credit balance too low for web search. "
+                    "Pipeline continues with built-in knowledge."
+                )
+                ctx.update({"trends": [], "market_sentiment": "unknown", "key_takeaway": ""})
+            elif phase["key"] == "trend_research" and not phase["critical"]:
+                status.update(
+                    label=f"Phase {phase['num']}: {phase['label']} — unavailable ({elapsed:.1f}s)",
+                    state="complete",
+                    expanded=False,
+                )
+                st.info(
+                    f"ℹ️ Live trend research unavailable ({type(e).__name__}: {e}). "
+                    "Pipeline continues with built-in knowledge."
+                )
+                ctx.update({"trends": [], "market_sentiment": "unknown", "key_takeaway": ""})
             else:
-                ctx["_phase_failed"] = True
+                status.update(label=f"Phase {phase['num']}: {phase['label']} — FAILED ({elapsed:.1f}s)",
+                              state="error")
+                st.error(f"**{agent.name}** failed: {e}")
+                st.code(traceback.format_exc(), language="text")
+                if not phase["critical"]:
+                    pass
+                else:
+                    ctx["_phase_failed"] = True
+        else:
+            # Successful run — warn if Phase 0 came back empty (web search silently returned nothing)
+            if phase["key"] == "trend_research" and not ctx.get("trends"):
+                st.info(
+                    "ℹ️ Web search returned no results for this domain. "
+                    "Pipeline continues with built-in knowledge."
+                )
     return ctx
 
 

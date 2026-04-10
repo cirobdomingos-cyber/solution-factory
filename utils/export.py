@@ -597,6 +597,65 @@ def update_idea_stage(
     return updated
 
 
+def _delete_session_db(path: str, user_email: str = "") -> bool | None:
+    """Delete a single Postgres-backed session by synthetic path.
+
+    Returns:
+        True/False when DB mode is active, None when DB is unavailable.
+    """
+    if not path.startswith("db:"):
+        return None
+    if not _ensure_db_schema():
+        return None
+
+    session_key = path[3:]
+    if not session_key:
+        return False
+
+    try:
+        import psycopg  # type: ignore
+
+        with psycopg.connect(_database_url(), autocommit=True) as conn:
+            with conn.cursor() as cur:
+                if user_email:
+                    cur.execute(
+                        f"DELETE FROM {SESSIONS_DB_TABLE} WHERE session_key = %s AND user_email = %s",
+                        (session_key, user_email),
+                    )
+                else:
+                    cur.execute(
+                        f"DELETE FROM {SESSIONS_DB_TABLE} WHERE session_key = %s",
+                        (session_key,),
+                    )
+                return cur.rowcount > 0
+    except Exception:
+        return False
+
+
+def delete_session(path: str, output_dir: str = "output", user_email: str = "") -> bool:
+    """Delete one saved session (DB or filesystem-backed)."""
+    db_deleted = _delete_session_db(path=path, user_email=user_email)
+    if db_deleted is not None:
+        return db_deleted
+
+    if not path or not os.path.isfile(path):
+        return False
+
+    try:
+        os.remove(path)
+    except OSError:
+        return False
+
+    index = _load_sessions_index(output_dir)
+    filename = os.path.basename(path)
+    index = [
+        row for row in index
+        if row.get("path") != path and row.get("filename") != filename
+    ]
+    _save_sessions_index(output_dir, index)
+    return True
+
+
 def export_results(context: dict, output_dir: str = "output") -> str:
     """Export full pipeline results to a timestamped JSON file.
 
