@@ -146,12 +146,20 @@ no text outside the JSON object."""
                 text = block.text
 
         if not text:
-            logger.warning(f"[{self.name}] No text in response, returning empty trends")
-            return {"trends": [], "market_sentiment": "unknown", "key_takeaway": ""}
+            logger.warning(f"[{self.name}] Web search returned no text — falling back to built-in knowledge call")
+            return self._run_builtin_fallback(user_prompt)
 
         logger.info(f"[{self.name}] Received {len(text)} chars")
 
         # Parse JSON — same cleanup as BaseAgent.call_json
+        return self._parse_text(text)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _parse_text(self, text: str) -> dict:
+        """Parse a JSON trend payload from raw LLM text."""
         cleaned = text.strip()
         if cleaned.startswith("```"):
             first_newline = cleaned.index("\n")
@@ -165,19 +173,71 @@ no text outside the JSON object."""
         except json.JSONDecodeError as e:
             logger.error(f"[{self.name}] Failed to parse JSON: {e}")
             logger.error(f"[{self.name}] Raw response:\n{text[:500]}")
-            # Graceful degradation — pipeline continues without trends
             return {"trends": [], "market_sentiment": "unknown", "key_takeaway": ""}
 
-        # Normalize wrapper objects
         if isinstance(result, dict) and "trends" in result:
             return {
                 "trends": result.get("trends", []),
                 "market_sentiment": result.get("market_sentiment", "unknown"),
                 "key_takeaway": result.get("key_takeaway", ""),
             }
-
-        # If the model returned a list directly, wrap it
         if isinstance(result, list):
             return {"trends": result, "market_sentiment": "unknown", "key_takeaway": ""}
-
         return {"trends": [], "market_sentiment": "unknown", "key_takeaway": ""}
+
+    def _run_builtin_fallback(self, user_prompt: str) -> dict:
+        """Call Claude without web search to get built-in knowledge trends.
+
+        Used when the web-search tool returns no text — e.g. the tool is not
+        available on this API tier, or the domain returned zero results.
+        The result is marked with _source='builtin' so the UI can label it.
+        """
+        logger.info(f"[{self.name}] Running built-in knowledge fallback for: {user_prompt}")
+        fallback_prompt = f"""You are a market trend researcher. Using your training knowledge,
+identify the most relevant trends, signals, and competitive dynamics for the
+following domain/idea. Do NOT apologise for lacking live data — just provide
+your best current knowledge.
+
+DOMAIN/IDEA: {user_prompt}
+
+Cover:
+1. Key trends shaping this space right now
+2. Main customer pain points and unmet needs
+3. Technology or regulatory forces enabling or threatening new entrants
+4. Competitive landscape and recent moves by incumbents
+
+IMPORTANT: Respond ONLY with valid JSON matching this schema:
+{{
+  "domain": "<domain string>",
+  "trends": [
+    {{
+      "title": "...",
+      "description": "...",
+      "source_signals": ["..."],
+      "opportunity_implication": "...",
+      "recency": "last_year"
+    }}
+  ],
+  "market_sentiment": "bullish|cautious|bearish",
+  "key_takeaway": "..."
+}}"""
+
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=self.system_prompt,
+                messages=[{"role": "user", "content": fallback_prompt}],
+            )
+            text = ""
+            for block in response.content:
+                if block.type == "text":
+                    text = block.text
+            if not text:
+                return {"trends": [], "market_sentiment": "unknown", "key_takeaway": ""}
+            result = self._parse_text(text)
+            result["_source"] = "builtin"
+            return result
+        except Exception as e:
+            logger.error(f"[{self.name}] Built-in fallback also failed: {e}")
+            return {"trends": [], "market_sentiment": "unknown", "key_takeaway": ""}
