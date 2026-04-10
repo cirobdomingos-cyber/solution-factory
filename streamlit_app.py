@@ -532,9 +532,13 @@ def render_trends(ctx: dict) -> None:
     """Render Phase 0 trends with metrics dashboard."""
     trends = ctx.get("trends", [])
     if not trends:
-        st.warning("No trends found. Continuing with built-in knowledge.")
+        st.warning("No trends found.")
         return
-    
+
+    source = ctx.get("_source", "live")
+    if source == "builtin":
+        st.info("ℹ️ Trends generated from Claude's built-in knowledge (web search unavailable for this domain or API tier).")
+
     # Use the new metrics-focused render function
     trends_output = {
         "trends": trends,
@@ -719,11 +723,13 @@ def summarize_trend_research(ctx: dict) -> str:
     trends = ctx.get("trends", [])
     sentiment = ctx.get("market_sentiment", "unknown")
     takeaway = ctx.get("key_takeaway", "")
+    source = ctx.get("_source", "live")
     if not trends:
-        return "No live trends found. Continuing with built-in knowledge."
+        return "No trends found. Continuing with built-in knowledge."
+    source_label = "built-in knowledge" if source == "builtin" else "live web search"
     titles = ", ".join(t.get("title", "?") for t in trends[:3])
     return (
-        f"Found **{len(trends)} trends** — sentiment: **{sentiment}**.\n\n"
+        f"Found **{len(trends)} trends** via {source_label} — sentiment: **{sentiment}**.\n\n"
         f"Top trends: {titles}\n\n"
         f"Key takeaway: *{takeaway}*"
     )
