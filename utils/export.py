@@ -140,8 +140,17 @@ def _ensure_db_schema() -> bool:
         return False
 
 
-def _save_session_db(payload: dict, current_phase: int) -> str | None:
-    """Persist a session payload in Postgres and return synthetic path."""
+def _save_session_db(
+    payload: dict,
+    current_phase: int,
+    existing_session_key: str = "",
+) -> str | None:
+    """Persist a session payload in Postgres and return synthetic path.
+
+    When ``existing_session_key`` is provided, updates that row instead of
+    inserting a new one. This keeps checkpoints for the same investigation in
+    a single session record.
+    """
     if not _ensure_db_schema():
         return None
 
@@ -149,32 +158,75 @@ def _save_session_db(payload: dict, current_phase: int) -> str | None:
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
     slug = _slugify(meta.get("user_prompt", "unknown")[:50])
-    session_key = f"{timestamp}_{slug}_{uuid.uuid4().hex[:8]}"
+    session_key = existing_session_key or f"{timestamp}_{slug}_{uuid.uuid4().hex[:8]}"
 
     try:
         import psycopg  # type: ignore
 
         with psycopg.connect(_database_url(), autocommit=True) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO {SESSIONS_DB_TABLE} (
-                        session_key, created_at, current_phase, user_email,
-                        idea_id, production_stage, stage_updated_at, payload
+                if existing_session_key:
+                    cur.execute(
+                        f"""
+                        UPDATE {SESSIONS_DB_TABLE}
+                        SET current_phase = %s,
+                            user_email = %s,
+                            idea_id = %s,
+                            production_stage = %s,
+                            stage_updated_at = %s,
+                            payload = %s::jsonb
+                        WHERE session_key = %s
+                        """,
+                        (
+                            current_phase,
+                            meta.get("owner_email", ""),
+                            meta.get("idea_id", ""),
+                            meta.get("production_stage", ""),
+                            meta.get("stage_updated_at", "") or now,
+                            json.dumps(payload, ensure_ascii=False, default=str),
+                            session_key,
+                        ),
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-                    """,
-                    (
-                        session_key,
-                        now,
-                        current_phase,
-                        meta.get("owner_email", ""),
-                        meta.get("idea_id", ""),
-                        meta.get("production_stage", ""),
-                        meta.get("stage_updated_at", "") or now,
-                        json.dumps(payload, ensure_ascii=False, default=str),
-                    ),
-                )
+                    if cur.rowcount == 0:
+                        cur.execute(
+                            f"""
+                            INSERT INTO {SESSIONS_DB_TABLE} (
+                                session_key, created_at, current_phase, user_email,
+                                idea_id, production_stage, stage_updated_at, payload
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                            """,
+                            (
+                                session_key,
+                                now,
+                                current_phase,
+                                meta.get("owner_email", ""),
+                                meta.get("idea_id", ""),
+                                meta.get("production_stage", ""),
+                                meta.get("stage_updated_at", "") or now,
+                                json.dumps(payload, ensure_ascii=False, default=str),
+                            ),
+                        )
+                else:
+                    cur.execute(
+                        f"""
+                        INSERT INTO {SESSIONS_DB_TABLE} (
+                            session_key, created_at, current_phase, user_email,
+                            idea_id, production_stage, stage_updated_at, payload
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        """,
+                        (
+                            session_key,
+                            now,
+                            current_phase,
+                            meta.get("owner_email", ""),
+                            meta.get("idea_id", ""),
+                            meta.get("production_stage", ""),
+                            meta.get("stage_updated_at", "") or now,
+                            json.dumps(payload, ensure_ascii=False, default=str),
+                        ),
+                    )
         return f"db:{session_key}"
     except Exception:
         return None
@@ -264,6 +316,7 @@ def _load_session_db(path: str) -> tuple[dict, int] | None:
             ctx["stage_updated_at"] = meta.get("stage_updated_at") or meta.get("timestamp", "")
         if "owner_email" not in ctx:
             ctx["owner_email"] = meta.get("owner_email", "")
+        ctx["session_path"] = path
 
         return ctx, int(current_phase)
     except Exception:
@@ -369,10 +422,19 @@ def save_session(
     context["stage_updated_at"] = context.get("stage_updated_at") or now_iso
     context["owner_email"] = user_email or context.get("owner_email", "")
 
+    existing_path = str(context.get("session_path", "") or "")
+    if existing_path and existing_path.startswith("db:"):
+        db_existing_key = existing_path[3:]
+    else:
+        db_existing_key = ""
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     slug = _slugify(context.get("user_prompt", "unknown")[:50])
     filename = f"{timestamp}_{slug}.json"
     filepath = os.path.join(sessions_dir, filename)
+    if existing_path and (not existing_path.startswith("db:")):
+        filepath = existing_path
+        filename = os.path.basename(existing_path)
 
     payload = {
         "_session_meta": {
@@ -390,8 +452,9 @@ def save_session(
         "context": context,
     }
 
-    db_path = _save_session_db(payload, current_phase)
+    db_path = _save_session_db(payload, current_phase, existing_session_key=db_existing_key)
     if db_path:
+        context["session_path"] = db_path
         return db_path
 
     with open(filepath, "w", encoding="utf-8") as f:
@@ -406,6 +469,8 @@ def save_session(
     })
     index.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
     _save_sessions_index(output_dir, index)
+
+    context["session_path"] = filepath
 
     return filepath
 
@@ -472,6 +537,7 @@ def load_session(path: str) -> tuple[dict, int]:
         ctx["stage_updated_at"] = meta.get("stage_updated_at") or meta.get("timestamp", "")
     if "owner_email" not in ctx:
         ctx["owner_email"] = meta.get("owner_email", "")
+    ctx["session_path"] = path
 
     return ctx, phase
 
