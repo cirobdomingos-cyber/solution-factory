@@ -66,33 +66,32 @@ Output format: JSON object with these fields:
 - cost_structure (string — rough cost breakdown)"""
 
     def run(self, context: dict) -> dict:
-        # Find the best concept — the one with the highest validation score
-        # that got a "proceed" recommendation
-        best_concept = None
-        best_score = 0
-
         validations = context.get("validations", [])
         concepts = context.get("concepts", [])
 
-        for v in validations:
-            if v.get("recommendation") == "proceed":
-                score = v.get("overall_score", 0)
-                if score > best_score:
-                    best_score = score
-                    best_concept = v.get("concept_ref")
+        # Use the concept selected by the user in the UI, if provided
+        best_concept = context.get("selected_concept")
 
-        # If nothing got "proceed", take the highest-scored "pivot"
+        # Fallback: auto-select if no user selection (e.g. orchestrator mode)
         if not best_concept:
+            best_score = 0
             for v in validations:
-                if v.get("recommendation") == "pivot":
+                if v.get("recommendation") == "proceed":
                     score = v.get("overall_score", 0)
                     if score > best_score:
                         best_score = score
                         best_concept = v.get("concept_ref")
 
-        # If still nothing, take the first concept
-        if not best_concept and concepts:
-            best_concept = concepts[0].get("name", "Unknown")
+            if not best_concept:
+                for v in validations:
+                    if v.get("recommendation") == "pivot":
+                        score = v.get("overall_score", 0)
+                        if score > best_score:
+                            best_score = score
+                            best_concept = v.get("concept_ref")
+
+            if not best_concept and concepts:
+                best_concept = concepts[0].get("name", "Unknown")
 
         # Find the full concept details
         concept_detail = next(

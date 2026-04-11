@@ -79,12 +79,23 @@ Output format: JSON object with these fields:
     def run(self, context: dict) -> dict:
         """Fetch live trends relevant to the user's domain/idea."""
         user_prompt = context["user_prompt"]
+        search_country = context.get("search_country", "worldwide")
+
+        geo_instruction = ""
+        if search_country and search_country != "worldwide":
+            from config import COUNTRY_NAMES_MAP
+            country_name = COUNTRY_NAMES_MAP.get(search_country, search_country)
+            geo_instruction = f"""
+GEOGRAPHIC FOCUS: {country_name}
+Prioritize trends, news, regulations, and market signals specific to {country_name}.
+Include the country/region name in your search queries to get locally relevant results.
+"""
 
         prompt = f"""Research the following domain/idea and find the latest real-world
 market trends, news, funding activity, and competitive signals.
 
 DOMAIN/IDEA: {user_prompt}
-
+{geo_instruction}
 Search for:
 1. Recent news and developments in this space (last 3-6 months)
 2. Funding rounds, acquisitions, or new entrants

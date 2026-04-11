@@ -30,3 +30,14 @@ MAX_PARALLEL = 3
 MAX_TOKENS_SPECIALIST = 8192
 MAX_TOKENS_ORCHESTRATOR = 8192
 MAX_TOKENS_CRITIC = 8192
+
+# Country code to English name mapping for search agents
+COUNTRY_NAMES_MAP = {
+    "worldwide": "worldwide",
+    "BR": "Brazil", "US": "United States", "GB": "United Kingdom",
+    "DE": "Germany", "FR": "France", "JP": "Japan", "IN": "India",
+    "CA": "Canada", "AU": "Australia", "PT": "Portugal", "ES": "Spain",
+    "MX": "Mexico", "AR": "Argentina", "CL": "Chile", "CO": "Colombia",
+    "CN": "China", "KR": "South Korea", "IL": "Israel", "AE": "United Arab Emirates",
+    "NG": "Nigeria", "KE": "Kenya", "SG": "Singapore",
+}
