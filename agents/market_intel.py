@@ -89,10 +89,22 @@ Use these real-world signals to ground your analysis. Prioritize opportunities
 that align with verified current trends over purely speculative ones.
 Reference specific trend data in your market_signals field."""
 
+        geo_section = ""
+        search_country = context.get("search_country", "worldwide")
+        if search_country and search_country != "worldwide":
+            from config import COUNTRY_NAMES_MAP
+            country_name = COUNTRY_NAMES_MAP.get(search_country, search_country)
+            geo_section = f"""
+
+GEOGRAPHIC FOCUS: {country_name}
+Prioritize opportunities relevant to the {country_name} market. Consider local
+regulations, market dynamics, consumer behavior, and competitive landscape
+specific to {country_name}."""
+
         prompt = f"""Analyze the following domain/idea and identify the strongest market opportunities.
 
 User's input: {context['user_prompt']}
-{trends_section}{self._guidance_block(context)}
+{trends_section}{geo_section}{self._guidance_block(context)}
 Focus on opportunities that:
 1. Address pain points people will PAY to solve (not just "nice to have")
 2. Have favorable timing right now

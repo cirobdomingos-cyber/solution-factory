@@ -35,7 +35,7 @@ def _safe(text: Any) -> str:
 class ReportPDF(FPDF):
     """Custom PDF with header/footer and helper draw methods."""
 
-    def __init__(self, title: str = "Solution Factory Report") -> None:
+    def __init__(self, title: str = "Relatório Fábrica de Soluções") -> None:
         super().__init__()
         self._report_title = title
         self.set_auto_page_break(auto=True, margin=18)

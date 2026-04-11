@@ -60,11 +60,22 @@ Rules:
 
     def run(self, context: dict) -> dict:
         user_prompt = context["user_prompt"]
+        search_country = context.get("search_country", "worldwide")
+
+        geo_instruction = ""
+        if search_country and search_country != "worldwide":
+            from config import COUNTRY_NAMES_MAP
+            country_name = COUNTRY_NAMES_MAP.get(search_country, search_country)
+            geo_instruction = f"""
+GEOGRAPHIC FOCUS: {country_name}
+Prioritize signals, launches, regulations, and opportunities specific to {country_name}.
+Include the country/region name in your search queries for locally relevant results.
+"""
 
         prompt = f"""The user wants to explore this domain broadly, then narrow down:
 
 DOMAIN: {user_prompt}
-
+{geo_instruction}
 Research current online signals and propose broad-to-narrow exploration paths.
 Use multiple searches to cover:
 1) market movement and launches
@@ -112,17 +123,25 @@ Return only the JSON structure defined in your instructions.
                 text = block.text
 
         if not text:
-            logger.warning(f"[{self.name}] No text in response, returning empty exploration")
-            return {
-                "exploration_domain": user_prompt,
-                "broad_areas": [],
-                "exploration_paths": [],
-            }
+            logger.warning(f"[{self.name}] No text in web search response — falling back to built-in knowledge")
+            return self._run_builtin_fallback(user_prompt, geo_instruction)
 
+        parsed = self._parse_text(text, user_prompt)
+        if not parsed.get("exploration_paths"):
+            logger.warning(f"[{self.name}] Web search returned no usable paths — falling back to built-in knowledge")
+            return self._run_builtin_fallback(user_prompt, geo_instruction)
+        return parsed
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _parse_text(self, text: str, user_prompt: str) -> dict:
+        """Parse JSON exploration payload from raw LLM text."""
         cleaned = text.strip()
         if cleaned.startswith("```"):
             first_newline = cleaned.index("\n")
-            cleaned = cleaned[first_newline + 1 :]
+            cleaned = cleaned[first_newline + 1:]
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3]
         cleaned = cleaned.strip()
@@ -150,3 +169,48 @@ Return only the JSON structure defined in your instructions.
             "broad_areas": result.get("broad_areas", []),
             "exploration_paths": result.get("exploration_paths", []),
         }
+
+    def _run_builtin_fallback(self, user_prompt: str, geo_instruction: str = "") -> dict:
+        """Call Claude without web search to get built-in knowledge exploration paths.
+
+        Used when the web-search tool returns no text or no usable paths.
+        """
+        logger.info(f"[{self.name}] Running built-in knowledge fallback for: {user_prompt}")
+        fallback_prompt = f"""The user wants to explore this domain broadly, then narrow down:
+
+DOMAIN: {user_prompt}
+{geo_instruction}
+Using your training knowledge, propose broad-to-narrow exploration paths.
+Cover diverse angles: market movement, funding, regulation, user pain points,
+and enabling technology.
+
+Return only the JSON structure defined in your instructions.
+"""
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=self.system_prompt,
+                messages=[{"role": "user", "content": fallback_prompt}],
+            )
+            text = ""
+            for block in response.content:
+                if block.type == "text":
+                    text = block.text
+            if not text:
+                return {
+                    "exploration_domain": user_prompt,
+                    "broad_areas": [],
+                    "exploration_paths": [],
+                    "_source": "builtin",
+                }
+            result = self._parse_text(text, user_prompt)
+            result["_source"] = "builtin"
+            return result
+        except Exception as e:
+            logger.error(f"[{self.name}] Built-in fallback also failed: {e}")
+            return {
+                "exploration_domain": user_prompt,
+                "broad_areas": [],
+                "exploration_paths": [],
+            }
