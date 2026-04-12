@@ -406,60 +406,6 @@ with st.sidebar:
         for stage, count in sorted(stage_counts.items(), key=lambda x: x[0]):
             st.markdown(f"- {stage}: {count}")
 
-        latest_by_idea: dict[str, dict] = {}
-        for session in saved_sessions:
-            idea_key = session.get("idea_id") or session.get("filename", "")
-            if idea_key and idea_key not in latest_by_idea:
-                latest_by_idea[idea_key] = session
-
-        st.divider()
-        st.subheader("Quadro de Produção")
-        stage_filter = st.selectbox(
-            "Filtrar estágio",
-            ["Todos"] + LIFECYCLE_STAGES,
-            key="production_board_stage_filter",
-        )
-
-        board_items = list(latest_by_idea.values())
-        if stage_filter != "Todos":
-            board_items = [
-                item for item in board_items
-                if item.get("production_stage", "Desconhecido") == stage_filter
-            ]
-
-        if board_items:
-            for item in board_items[:8]:
-                idea_id = item.get("idea_id") or item.get("filename", "")
-                current_stage = item.get("production_stage") or "Backlog"
-                title = (item.get("user_prompt") or "Ideia sem título")[:48]
-                st.markdown(f"**{title}**")
-                st.caption(f"{idea_id} | {current_stage}")
-
-                move_col, action_col = st.columns([2, 1])
-                with move_col:
-                    default_idx = LIFECYCLE_STAGES.index(current_stage) if current_stage in LIFECYCLE_STAGES else 0
-                    target_stage = st.selectbox(
-                        "Mover para",
-                        LIFECYCLE_STAGES,
-                        index=default_idx,
-                        key=f"stage_target_{idea_id}",
-                        label_visibility="collapsed",
-                    )
-                with action_col:
-                    if st.button("Atualizar", key=f"stage_apply_{idea_id}", use_container_width=True):
-                        updated_count = update_idea_stage(
-                            idea_id=idea_id,
-                            new_stage=target_stage,
-                            user_email=_USER_EMAIL,
-                        )
-                        if updated_count:
-                            st.success(f"{updated_count} sessão(ões) atualizada(s).")
-                        else:
-                            st.warning("Nenhuma sessão encontrada para atualizar.")
-                        st.rerun()
-        else:
-            st.caption("Nenhuma ideia neste estágio ainda.")
-
     if saved_sessions:
         st.divider()
         st.subheader("Gerenciar Sessões Anteriores")
