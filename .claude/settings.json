@@ -5,7 +5,12 @@
       "Bash(py -3.12 -c \"from orchestrator import SolutionOrchestrator; o = SolutionOrchestrator\\(\\); print\\(list\\(o.agents.keys\\(\\)\\)\\)\")",
       "Bash(py -3.12 -c \"import streamlit; print\\(f'Streamlit {streamlit.__version__}'\\)\")",
       "Bash(py -3.12 -c \"import py_compile; py_compile.compile\\('streamlit_app.py', doraise=True\\); print\\('Syntax OK'\\)\")",
-      "Bash(py -3.12 -c \"import py_compile; [py_compile.compile\\(f, doraise=True\\) for f in ['streamlit_app.py', 'agents/topic_explorer.py']]; print\\('OK'\\)\")"
+      "Bash(py -3.12 -c \"import py_compile; [py_compile.compile\\(f, doraise=True\\) for f in ['streamlit_app.py', 'agents/topic_explorer.py']]; print\\('OK'\\)\")",
+      "Bash(py -3.12 -c \"import streamlit_app\")",
+      "Bash(py -3.12 -c \"from agents.trend_researcher import TrendResearchAgent; from agents.trend_explorer import OnlineTrendExplorerAgent; from agents.market_intel import MarketIntelligenceAgent; from config import COUNTRY_NAMES_MAP; print\\('All imports OK'\\); print\\(f'Countries: {len\\(COUNTRY_NAMES_MAP\\)}'\\)\")",
+      "Bash(py -3.12 -m py_compile streamlit_app.py)",
+      "Bash(py -3.12 -m py_compile agents/trend_explorer.py)",
+      "Bash(py -3.12 -m py_compile utils/prompt_generator.py)"
     ]
   }
 }
